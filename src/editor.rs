@@ -8,6 +8,8 @@ use crate::node_ref::NodeRef;
 use fyaml_sys::*;
 
 use libc::c_char;
+use std::cmp::Ordering;
+use std::os::raw::{c_int, c_void};
 use std::ptr::{self, NonNull};
 
 // =============================================================================
@@ -708,6 +710,82 @@ impl<'doc> Editor<'doc> {
         Ok(())
     }
 
+    // ==================== Sorting Operations ====================
+
+    /// Sorts a single mapping's keys in-place at the given path.
+    ///
+    /// The comparator receives key-value pairs from the mapping as
+    /// `(key_a, value_a, key_b, value_b)` and returns an [`Ordering`].
+    ///
+    /// Unlike [`sort_at`](Self::sort_at), this does **not** recurse into
+    /// child nodes — only the keys of the targeted mapping are reordered.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Ffi`] if the path doesn't exist and
+    /// [`Error::TypeMismatch`] if it doesn't point to a mapping.
+    pub fn sort_mapping_at<F>(&mut self, path: &str, cmp: F) -> Result<()>
+    where
+        F: FnMut(NodeRef<'_>, NodeRef<'_>, NodeRef<'_>, NodeRef<'_>) -> Ordering,
+    {
+        let node_ptr = self.get_node_ptr_at(path)?;
+        let node_type = unsafe { fy_node_get_type(node_ptr) };
+        if node_type != FYNT_MAPPING {
+            return Err(Error::TypeMismatch {
+                expected: "mapping",
+                got: "non-mapping",
+            });
+        }
+        let mut ctx = SortContext {
+            cmp,
+            doc: &*self.doc,
+        };
+        let ret = unsafe {
+            fy_node_mapping_sort(
+                node_ptr,
+                Some(sort_trampoline::<F>),
+                &mut ctx as *mut SortContext<'_, F> as *mut c_void,
+            )
+        };
+        if ret != 0 {
+            return Err(Error::Ffi("fy_node_mapping_sort failed"));
+        }
+        Ok(())
+    }
+
+    /// Recursively sorts all mapping keys under the node at the given path.
+    ///
+    /// The comparator receives key-value pairs as
+    /// `(key_a, value_a, key_b, value_b)` and returns an [`Ordering`].
+    ///
+    /// Traverses the entire subtree: sequences are walked for nested
+    /// mappings, and both keys and values of mappings are recursed into.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Ffi`] if the path doesn't exist.
+    pub fn sort_at<F>(&mut self, path: &str, cmp: F) -> Result<()>
+    where
+        F: FnMut(NodeRef<'_>, NodeRef<'_>, NodeRef<'_>, NodeRef<'_>) -> Ordering,
+    {
+        let node_ptr = self.get_node_ptr_at(path)?;
+        let mut ctx = SortContext {
+            cmp,
+            doc: &*self.doc,
+        };
+        let ret = unsafe {
+            fy_node_sort(
+                node_ptr,
+                Some(sort_trampoline::<F>),
+                &mut ctx as *mut SortContext<'_, F> as *mut c_void,
+            )
+        };
+        if ret != 0 {
+            return Err(Error::Ffi("fy_node_sort failed"));
+        }
+        Ok(())
+    }
+
     // ==================== Internal Helpers ====================
 
     fn get_node_ptr_at(&self, path: &str) -> Result<*mut fy_node> {
@@ -725,6 +803,44 @@ impl<'doc> Editor<'doc> {
         }
         Ok(node_ptr)
     }
+}
+
+/// Carries a Rust closure and document reference through the C sort callback.
+struct SortContext<'doc, F> {
+    cmp: F,
+    doc: &'doc Document,
+}
+
+/// `extern "C"` trampoline that bridges libfyaml's sort callback to a Rust closure.
+///
+/// # Safety
+///
+/// `arg` must point to a valid `SortContext<F>` for the duration of the call.
+/// This is guaranteed because `sort_mapping_at` / `sort_at` create the context
+/// on the stack and pass a pointer that remains valid until the FFI call returns.
+extern "C" fn sort_trampoline<F>(
+    fynp_a: *const fy_node_pair,
+    fynp_b: *const fy_node_pair,
+    arg: *mut c_void,
+) -> c_int
+where
+    F: FnMut(NodeRef<'_>, NodeRef<'_>, NodeRef<'_>, NodeRef<'_>) -> Ordering,
+{
+    let ctx = unsafe { &mut *(arg as *mut SortContext<'_, F>) };
+
+    // fy_node_pair_key/value take *mut but only read; the const→mut cast is safe.
+    let key_a_ptr = unsafe { fy_node_pair_key(fynp_a as *mut _) };
+    let val_a_ptr = unsafe { fy_node_pair_value(fynp_a as *mut _) };
+    let key_b_ptr = unsafe { fy_node_pair_key(fynp_b as *mut _) };
+    let val_b_ptr = unsafe { fy_node_pair_value(fynp_b as *mut _) };
+
+    // Construct NodeRefs. The pointers are valid for the duration of the sort.
+    let key_a = NodeRef::new(unsafe { NonNull::new_unchecked(key_a_ptr) }, ctx.doc);
+    let val_a = NodeRef::new(unsafe { NonNull::new_unchecked(val_a_ptr) }, ctx.doc);
+    let key_b = NodeRef::new(unsafe { NonNull::new_unchecked(key_b_ptr) }, ctx.doc);
+    let val_b = NodeRef::new(unsafe { NonNull::new_unchecked(val_b_ptr) }, ctx.doc);
+
+    (ctx.cmp)(key_a, val_a, key_b, val_b) as c_int
 }
 
 #[cfg(test)]
