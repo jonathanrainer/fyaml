@@ -845,7 +845,10 @@ where
 
 #[cfg(test)]
 mod tests {
+    use crate::node_ref::NodeRef;
     use crate::Document;
+    use indoc::indoc;
+    use std::cmp::Ordering;
 
     #[test]
     fn test_set_yaml_at_replace() {
@@ -1112,5 +1115,130 @@ mod tests {
         assert!(root.is_scalar());
         let emitted = root.emit().unwrap();
         assert!(emitted.is_empty() || emitted == "null");
+    }
+
+    /// Compare mapping keys alphabetically by scalar value.
+    fn by_key(ka: NodeRef<'_>, _va: NodeRef<'_>, kb: NodeRef<'_>, _vb: NodeRef<'_>) -> Ordering {
+        ka.scalar_str().unwrap().cmp(kb.scalar_str().unwrap())
+    }
+
+    /// Collect mapping (key, value) pairs at `path` (empty string = root).
+    fn mapping_entries<'a>(doc: &'a Document, path: &str) -> Vec<(&'a str, &'a str)> {
+        let node = if path.is_empty() {
+            doc.root().unwrap()
+        } else {
+            doc.at_path(path).unwrap()
+        };
+        node.map_iter()
+            .map(|(k, v)| (k.scalar_str().unwrap(), v.scalar_str().unwrap()))
+            .collect()
+    }
+
+    #[test]
+    fn test_sort_mapping_at_alphabetical() {
+        let mut doc = Document::parse_str("{c: 3, a: 1, b: 2}").unwrap();
+        doc.edit().sort_mapping_at("", by_key).unwrap();
+        assert_eq!(
+            mapping_entries(&doc, ""),
+            vec![("a", "1"), ("b", "2"), ("c", "3")]
+        );
+    }
+
+    #[test]
+    fn test_sort_mapping_at_by_value() {
+        let mut doc = Document::parse_str("{c: 1, a: 3, b: 2}").unwrap();
+        doc.edit()
+            .sort_mapping_at("", |_ka, va, _kb, vb| {
+                va.scalar_str().unwrap().cmp(vb.scalar_str().unwrap())
+            })
+            .unwrap();
+        assert_eq!(
+            mapping_entries(&doc, ""),
+            vec![("c", "1"), ("b", "2"), ("a", "3")]
+        );
+    }
+
+    #[test]
+    fn test_sort_mapping_at_non_recursive() {
+        let mut doc = Document::parse_str("{b: 1, a: {z: 1, y: 2}}").unwrap();
+        doc.edit().sort_mapping_at("", by_key).unwrap();
+        // Value follows key after sort
+        assert_eq!(doc.at_path("/b").unwrap().scalar_str().unwrap(), "1");
+        assert!(doc.at_path("/a").unwrap().is_mapping());
+        // Nested mapping keys are NOT sorted (non-recursive)
+        assert_eq!(mapping_entries(&doc, "/a"), vec![("z", "1"), ("y", "2")]);
+    }
+
+    #[test]
+    fn test_sort_at_recursive() {
+        let mut doc = Document::parse_str("{b: 1, a: {z: 1, y: 2}}").unwrap();
+        doc.edit().sort_at("", by_key).unwrap();
+        // Value follows key after sort
+        assert_eq!(doc.at_path("/b").unwrap().scalar_str().unwrap(), "1");
+        assert!(doc.at_path("/a").unwrap().is_mapping());
+        // Nested mapping keys ARE sorted (recursive)
+        assert_eq!(mapping_entries(&doc, "/a"), vec![("y", "2"), ("z", "1")]);
+    }
+
+    #[test]
+    fn test_sort_mapping_at_nested_path() {
+        let mut doc = Document::parse_str(indoc! {"
+            outer:
+              c: 3
+              a: 1
+              b: 2
+        "})
+        .unwrap();
+        doc.edit().sort_mapping_at("/outer", by_key).unwrap();
+        assert_eq!(
+            mapping_entries(&doc, "/outer"),
+            vec![("a", "1"), ("b", "2"), ("c", "3")]
+        );
+    }
+
+    #[test]
+    fn test_sort_mapping_at_error_on_non_mapping() {
+        let mut doc = Document::parse_str("[1, 2, 3]").unwrap();
+        assert!(doc.edit().sort_mapping_at("", by_key).is_err());
+    }
+
+    #[test]
+    fn test_sort_mapping_at_empty_mapping() {
+        let mut doc = Document::parse_str("{}").unwrap();
+        doc.edit().sort_mapping_at("", by_key).unwrap();
+        assert_eq!(doc.root().unwrap().map_len().unwrap(), 0);
+    }
+
+    #[test]
+    fn test_sort_mapping_at_single_entry() {
+        let mut doc = Document::parse_str("{a: 1}").unwrap();
+        doc.edit().sort_mapping_at("", by_key).unwrap();
+        assert_eq!(mapping_entries(&doc, ""), vec![("a", "1")]);
+    }
+
+    #[test]
+    fn test_sort_preserves_comments() {
+        let mut doc = Document::parse_str(indoc! {"
+            # top comment
+            c: 3 # c comment
+            a: 1 # a comment
+            b: 2
+        "})
+        .unwrap();
+        doc.edit().sort_mapping_at("", by_key).unwrap();
+        let output = doc.emit().unwrap();
+        assert_eq!(
+            mapping_entries(&doc, ""),
+            vec![("a", "1"), ("b", "2"), ("c", "3")]
+        );
+        // Inline comments must stay attached to their key-value pairs
+        assert!(
+            output.contains("a: 1 # a comment"),
+            "expected 'a: 1 # a comment' in:\n{output}"
+        );
+        assert!(
+            output.contains("c: 3 # c comment"),
+            "expected 'c: 3 # c comment' in:\n{output}"
+        );
     }
 }
