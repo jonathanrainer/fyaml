@@ -593,6 +593,8 @@ assert!(value.is_scalar());
 | ~ed.set_tag(node, tag)~       | Set YAML tag on detached node             |
 | ~ed.set_style(node, style)~   | Set YAML style on detached node, returns actual style |
 | ~ed.seq_append_at(path, item)~ | Append item to sequence at path          |
+| ~ed.sort_mapping_at(path, cmp)~ | Sort a single mapping's keys in-place at path |
+| ~ed.sort_at(path, cmp)~       | Recursively sort all mapping keys under path |
 | ~ed.root()~                   | Read root during edit session             |
 | ~ed.at_path(path)~            | Navigate during edit session              |
 
