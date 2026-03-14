@@ -11,6 +11,7 @@ pub mod value;
 // Core modules (formerly v2)
 mod document;
 mod editor;
+mod emitter;
 mod iter;
 mod node_ref;
 mod parser;
@@ -19,6 +20,7 @@ mod value_ref;
 // Re-export main API
 pub use document::Document;
 pub use editor::{Editor, RawNodeHandle};
+pub use emitter::{EmitEvent, EmitMode, Emitter, Toggle, WriteType};
 pub use iter::{MapIter, SeqIter};
 pub use node::{NodeStyle, NodeType};
 pub use node_ref::NodeRef;
