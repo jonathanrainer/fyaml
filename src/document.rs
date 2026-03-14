@@ -3,6 +3,7 @@
 use crate::config;
 use crate::diag::{diag_error, Diag};
 use crate::editor::Editor;
+use crate::emitter::Emitter;
 use crate::error::{Error, Result};
 use crate::ffi_util::{malloc_copy, take_c_string};
 use crate::node_ref::NodeRef;
@@ -390,6 +391,26 @@ impl Document {
     #[inline]
     pub fn edit(&mut self) -> Editor<'_> {
         Editor::new(self)
+    }
+
+    /// Returns an emitter for this document.
+    ///
+    /// The emitter provides [`emit_events`](Emitter::emit_events)
+    /// for obtaining a typed event stream during emission.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use fyaml::Document;
+    ///
+    /// let doc = Document::parse_str("foo: bar").unwrap();
+    /// let events = doc.emitter().emit_events().unwrap();
+    /// let yaml: String = events.iter().map(|e| e.content.as_str()).collect();
+    /// assert!(yaml.contains("foo: bar"));
+    /// ```
+    #[inline]
+    pub fn emitter(&self) -> Emitter<'_> {
+        Emitter::new(self)
     }
 
     /// Emits the document as a YAML string.
