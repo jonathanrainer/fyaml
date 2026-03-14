@@ -1,6 +1,6 @@
 [package]
 name = "fyaml"
-version = "%%version%%"
+version = "0.5.0"
 edition = "2021"
 authors = ["Valentin Lab <valentin.lab@kalysto.org>"]
 build = "build.rs"
@@ -27,3 +27,6 @@ serde_json = "1.0"
 trybuild = "1.0"
 
 [workspace]
+
+[patch.crates-io]
+fyaml-sys = { git = "https://github.com/jonathanrainer/fyaml-sys", branch = "integration" }
