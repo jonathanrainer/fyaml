@@ -785,6 +785,51 @@ impl<'doc> Editor<'doc> {
         Ok(())
     }
 
+    /// Sorts a sequence's items in-place at the given path.
+    ///
+    /// The comparator receives pairs of sequence items as `NodeRef`s
+    /// and returns an [`Ordering`].
+    ///
+    /// Node metadata (comments, styles, tags) is preserved because
+    /// libfyaml moves items by pointer rather than copying them.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Ffi`] if the path doesn't exist and
+    /// [`Error::TypeMismatch`] if it doesn't point to a sequence.
+    pub fn sort_sequence_at<F>(&mut self, path: &str, cmp: F) -> Result<()>
+    where
+        F: FnMut(NodeRef<'_>, NodeRef<'_>) -> Ordering,
+    {
+        let seq_ptr = self.get_node_ptr_at(path)?;
+        let seq_type = unsafe { fy_node_get_type(seq_ptr) };
+        if seq_type != FYNT_SEQUENCE {
+            return Err(Error::TypeMismatch {
+                expected: "sequence",
+                got: "non-sequence",
+            });
+        }
+        // fy_node_sequence_sort may not preserve the sequence's style, so we
+        // save it here and restore it afterwards.
+        let style = unsafe { fy_node_get_style(seq_ptr) };
+        let mut ctx = SeqSortContext {
+            cmp,
+            doc: &*self.doc,
+        };
+        let ret = unsafe {
+            fy_node_sequence_sort(
+                seq_ptr,
+                Some(seq_sort_trampoline::<F>),
+                &mut ctx as *mut SeqSortContext<'_, F> as *mut c_void,
+            )
+        };
+        if ret != 0 {
+            return Err(Error::Ffi("fy_node_sequence_sort failed"));
+        }
+        unsafe { fy_node_set_style(seq_ptr, style) };
+        Ok(())
+    }
+
     // ==================== Internal Helpers ====================
 
     fn get_node_ptr_at(&self, path: &str) -> Result<*mut fy_node> {
@@ -840,6 +885,34 @@ where
     let val_b = NodeRef::new(unsafe { NonNull::new_unchecked(val_b_ptr) }, ctx.doc);
 
     (ctx.cmp)(key_a, val_a, key_b, val_b) as c_int
+}
+
+/// Carries a Rust closure and document reference through the C sequence sort callback.
+struct SeqSortContext<'doc, F> {
+    cmp: F,
+    doc: &'doc Document,
+}
+
+/// `extern "C"` trampoline that bridges libfyaml's `fy_node_sequence_sort` callback
+/// to a Rust closure.
+///
+/// # Safety
+///
+/// `arg` must point to a valid `SeqSortContext<F>` for the duration of the call.
+/// This is guaranteed because `sort_sequence_at` creates the context on the stack
+/// and passes a pointer that remains valid until the FFI call returns.
+extern "C" fn seq_sort_trampoline<F>(
+    fyn_a: *mut fy_node,
+    fyn_b: *mut fy_node,
+    arg: *mut c_void,
+) -> c_int
+where
+    F: FnMut(NodeRef<'_>, NodeRef<'_>) -> Ordering,
+{
+    let ctx = unsafe { &mut *(arg as *mut SeqSortContext<'_, F>) };
+    let node_a = NodeRef::new(unsafe { NonNull::new_unchecked(fyn_a) }, ctx.doc);
+    let node_b = NodeRef::new(unsafe { NonNull::new_unchecked(fyn_b) }, ctx.doc);
+    (ctx.cmp)(node_a, node_b) as c_int
 }
 
 #[cfg(test)]
@@ -1238,6 +1311,130 @@ mod tests {
         assert!(
             output.contains("c: 3 # c comment"),
             "expected 'c: 3 # c comment' in:\n{output}"
+        );
+    }
+
+    /// Collect sequence items as scalar strings.
+    fn seq_entries<'a>(doc: &'a Document, path: &str) -> Vec<&'a str> {
+        let node = if path.is_empty() {
+            doc.root().unwrap()
+        } else {
+            doc.at_path(path).unwrap()
+        };
+        node.seq_iter()
+            .map(|item| item.scalar_str().unwrap())
+            .collect()
+    }
+
+    #[test]
+    fn test_sort_sequence_at_alphabetical() {
+        let mut doc = Document::parse_str("[c, a, b]").unwrap();
+        doc.edit()
+            .sort_sequence_at("", |a, b| {
+                a.scalar_str().unwrap().cmp(b.scalar_str().unwrap())
+            })
+            .unwrap();
+        assert_eq!(seq_entries(&doc, ""), vec!["a", "b", "c"]);
+    }
+
+    #[test]
+    fn test_sort_sequence_at_preserves_flow_style() {
+        let mut doc = Document::parse_str("items: [c, a, b]\n").unwrap();
+        doc.edit()
+            .sort_sequence_at("/items", |a, b| {
+                a.scalar_str().unwrap().cmp(b.scalar_str().unwrap())
+            })
+            .unwrap();
+        assert_eq!(seq_entries(&doc, "/items"), vec!["a", "b", "c"]);
+        let output = doc.to_string();
+        // Flow style (brackets) must be preserved; exact whitespace is not
+        // guaranteed because MODE_ORIGINAL replays position-specific tokens.
+        assert!(output.contains('['), "expected flow brackets in:\n{output}");
+        assert!(!output.contains("\n- "), "expected no block-style dashes in:\n{output}");
+    }
+
+    #[test]
+    fn test_sort_sequence_at_block_style() {
+        let mut doc = Document::parse_str(indoc! {"
+            items:
+              - cherry
+              - apple
+              - banana
+        "})
+        .unwrap();
+        doc.edit()
+            .sort_sequence_at("/items", |a, b| {
+                a.scalar_str().unwrap().cmp(b.scalar_str().unwrap())
+            })
+            .unwrap();
+        assert_eq!(
+            seq_entries(&doc, "/items"),
+            vec!["apple", "banana", "cherry"]
+        );
+    }
+
+    #[test]
+    fn test_sort_sequence_at_already_sorted() {
+        let mut doc = Document::parse_str("[a, b, c]").unwrap();
+        doc.edit()
+            .sort_sequence_at("", |a, b| {
+                a.scalar_str().unwrap().cmp(b.scalar_str().unwrap())
+            })
+            .unwrap();
+        assert_eq!(seq_entries(&doc, ""), vec!["a", "b", "c"]);
+    }
+
+    #[test]
+    fn test_sort_sequence_at_single_item() {
+        let mut doc = Document::parse_str("[a]").unwrap();
+        doc.edit()
+            .sort_sequence_at("", |a, b| {
+                a.scalar_str().unwrap().cmp(b.scalar_str().unwrap())
+            })
+            .unwrap();
+        assert_eq!(seq_entries(&doc, ""), vec!["a"]);
+    }
+
+    #[test]
+    fn test_sort_sequence_at_empty() {
+        let mut doc = Document::parse_str("[]").unwrap();
+        doc.edit()
+            .sort_sequence_at("", |a, b| {
+                a.scalar_str().unwrap().cmp(b.scalar_str().unwrap())
+            })
+            .unwrap();
+        assert_eq!(doc.root().unwrap().seq_len().unwrap(), 0);
+    }
+
+    #[test]
+    fn test_sort_sequence_at_error_on_non_sequence() {
+        let mut doc = Document::parse_str("{a: 1}").unwrap();
+        assert!(doc
+            .edit()
+            .sort_sequence_at("", |a, b| {
+                a.scalar_str().unwrap().cmp(b.scalar_str().unwrap())
+            })
+            .is_err());
+    }
+
+    #[test]
+    fn test_sort_sequence_at_preserves_styles() {
+        let mut doc = Document::parse_str(r#"['c', "b", a]"#).unwrap();
+        doc.edit()
+            .sort_sequence_at("", |a, b| {
+                a.scalar_str().unwrap().cmp(b.scalar_str().unwrap())
+            })
+            .unwrap();
+        assert_eq!(seq_entries(&doc, ""), vec!["a", "b", "c"]);
+        let output = doc.emit().unwrap();
+        // Quoting styles should be preserved
+        assert!(
+            output.contains(r#""b""#),
+            "expected double-quoted b in:\n{output}"
+        );
+        assert!(
+            output.contains("'c'"),
+            "expected single-quoted c in:\n{output}"
         );
     }
 }
