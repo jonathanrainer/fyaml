@@ -659,7 +659,7 @@ impl<'doc> Editor<'doc> {
     /// Creates a scalar node from raw pointer and length.
     ///
     /// Pass `(ptr::null(), 0)` for YAML null (distinct from empty string `("", 0)`).
-    fn build_scalar_raw(&mut self, ptr: *const i8, len: usize) -> Result<RawNodeHandle> {
+    fn build_scalar_raw(&mut self, ptr: *const c_char, len: usize) -> Result<RawNodeHandle> {
         let node_ptr = unsafe { fy_node_create_scalar_copy(self.doc_ptr(), ptr, len) };
         RawNodeHandle::try_from_ptr(node_ptr, "fy_node_create_scalar_copy failed")
     }
