@@ -479,7 +479,7 @@ impl<'doc> Editor<'doc> {
         let pair_ptr = unsafe {
             fy_node_mapping_lookup_pair_by_string(
                 parent_ptr,
-                old_key.as_ptr() as *const i8,
+                old_key.as_ptr() as *const c_char,
                 old_key.len(),
             )
         };
@@ -492,7 +492,7 @@ impl<'doc> Editor<'doc> {
             let existing = unsafe {
                 fy_node_mapping_lookup_pair_by_string(
                     parent_ptr,
-                    new_key.as_ptr() as *const i8,
+                    new_key.as_ptr() as *const c_char,
                     new_key.len(),
                 )
             };
@@ -505,7 +505,7 @@ impl<'doc> Editor<'doc> {
         let new_key_node = unsafe {
             fy_node_create_scalar_copy(
                 self.doc_ptr(),
-                new_key.as_ptr() as *const i8,
+                new_key.as_ptr() as *const c_char,
                 new_key.len(),
             )
         };
